@@ -35,8 +35,8 @@ UTC = UTCtz()
 
 
 def request(method, url, params=None, data=None, headers=None, raw_response=False):
-    post_data = urllib.parse.urlencode(data).encode() or None
-    query_string = urllib.parseurlencode(data) or None
+    post_data = urllib.parse.urlencode(data).encode() if data is not None else None
+    query_string = urllib.parse.urlencode(params) if params is not None else None
 
     url_string = "%s?%s" % (url, query_string) if query_string else url
 
@@ -46,10 +46,16 @@ def request(method, url, params=None, data=None, headers=None, raw_response=Fals
     if raw_response:
         return urllib.request.urlopen(request)
     else:
-        with urllib.request.urlopen(request) as response:
+        try:
+            response = urllib.request.urlopen(request)
             response_data = json.loads(response.read().decode('UTF-8'))
 
-        return response_data
+            return response_data
+        except urllib.error.HTTPError as error:
+            print(error)
+            print(error.headers)
+            print(error.reason)
+            raise
 
 def get(*args, **kwargs):
     return request("GET", *args, **kwargs)
@@ -131,7 +137,7 @@ def refresh_token(refresh_token, client_id, client_secret):
     }
 
     headers = {
-        "Authorization": base64.b64encode("%s:%s" % (client_id, client_secret)),
+        "Authorization": b"Basic " + base64.b64encode(("%s:%s" % (client_id, client_secret)).encode()),
     }
 
     response_data = post(endpoint, data=body_parameters, headers=headers)
