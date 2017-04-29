@@ -35,8 +35,8 @@ UTC = UTCtz()
 
 
 def request(method, url, params=None, data=None, headers=None, raw_response=False):
-    post_data = urllib.parse.urlencode(data).encode() or None
-    query_string = urllib.parseurlencode(data) or None
+    post_data = urllib.parse.urlencode(data).encode() if data is not None else None
+    query_string = urllib.parse.urlencode(params) if params is not None else None
 
     url_string = "%s?%s" % (url, query_string) if query_string else url
 
@@ -46,10 +46,16 @@ def request(method, url, params=None, data=None, headers=None, raw_response=Fals
     if raw_response:
         return urllib.request.urlopen(request)
     else:
-        with urllib.request.urlopen(request) as response:
+        try:
+            response = urllib.request.urlopen(request)
             response_data = json.loads(response.read().decode('UTF-8'))
 
-        return response_data
+            return response_data
+        except urllib.error.HTTPError as error:
+            print(error)
+            print(error.headers)
+            print(error.reason)
+            raise
 
 def get(*args, **kwargs):
     return request("GET", *args, **kwargs)
@@ -131,7 +137,7 @@ def refresh_token(refresh_token, client_id, client_secret):
     }
 
     headers = {
-        "Authorization": base64.b64encode("%s:%s" % (client_id, client_secret)),
+        "Authorization": b"Basic " + base64.b64encode(("%s:%s" % (client_id, client_secret)).encode()),
     }
 
     response_data = post(endpoint, data=body_parameters, headers=headers)
@@ -146,6 +152,33 @@ def refresh_token(refresh_token, client_id, client_secret):
         response_data["refresh_token"] = refresh_token
 
     return response_data
+
+
+def list_playlists(token):
+    endpoint = "https://api.spotify.com/v1/me/playlists"
+    headers = {
+        "Authorization": "%(token_type)s %(access_token)s" % token,
+    }
+
+    total_number = 2**63 - 1  # Very high number, will be corrected after fetch
+    limit = 50
+    current_playlist = 0
+
+    while current_playlist < total_number:
+        query = {
+            "limit": limit,
+            "offset": current_playlist,
+        }
+
+        response_data = get(endpoint, params=query, headers=headers)
+
+        total_number = response_data.get("total", 0)
+        limit = response_data.get("limit", 20)
+
+
+        for playlist_data in response_data.get("items", []):
+            yield playlist_data
+            current_playlist += 1
 
 
 if __name__ == "__main__":
@@ -174,3 +207,6 @@ if __name__ == "__main__":
 
         with open(TOKEN_FILE, "w") as token_file:
             json.dump(token_data, token_file)
+
+    for playlist in list_playlists(token_data):
+        print(playlist.get("name"))
