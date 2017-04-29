@@ -177,7 +177,7 @@ def list_playlists(token):
 
 
         for playlist_data in response_data.get("items", []):
-            print(playlist_data.get("name"))
+            yield playlist_data
             current_playlist += 1
 
 
@@ -208,4 +208,5 @@ if __name__ == "__main__":
         with open(TOKEN_FILE, "w") as token_file:
             json.dump(token_data, token_file)
 
-    list_playlists(token_data)
+    for playlist in list_playlists(token_data):
+        print(playlist.get("name"))
