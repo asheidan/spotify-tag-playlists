@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import base64
 from datetime import datetime, timedelta, tzinfo
 import http.server
@@ -9,14 +10,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-REDIRECT_SERVER_PORT = 8000
+DEFAULT_REDIRECT_SERVER_PORT = 8000
 REDIRECT_TO_ADDRESS = "https://accounts.spotify.com/authorize"
 NEEDED_SCOPES = [
     "playlist-read-private",
 ]
 
-SPOTIFY_APP_FILE = "spotify_app.json"
-TOKEN_FILE = "access_token.json"
+DEFAULT_SPOTIFY_APP_FILE = "spotify_app.json"
+DEFAULT_TOKEN_FILE = "access_token.json"
 
 CODE = None
 
@@ -64,14 +65,14 @@ def post(*args, **kwargs):
     return request("POST", *args, **kwargs)
 
 
-def request_code(client_id):
+def request_code(options: argparse.Namespace):
     global CODE
     class RedirectRequestHandler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             request_data = urllib.parse.urlencode({
-                "client_id": client_id,
+                "client_id": options.spotify_data["client_id"],
                 "response_type": "code",
-                "redirect_uri": "http://localhost:%s" % REDIRECT_SERVER_PORT,
+                "redirect_uri": "http://localhost:%s" % options.redirect_server_port,
                 "scope": " ".join(NEEDED_SCOPES),
             })
             redirect_url = "%s?%s" % (REDIRECT_TO_ADDRESS, request_data)
@@ -92,8 +93,7 @@ def request_code(client_id):
             self.end_headers()
             self.wfile.write(b"Successfully received token!\nYou can now close this window")
 
-
-    server_address = ("localhost", REDIRECT_SERVER_PORT)
+    server_address = ("localhost", options.redirect_server_port)
 
     server = http.server.HTTPServer(server_address, RedirectRequestHandler)
     print("Starting redirect-server on: http://%s:%s" % server_address)
@@ -181,14 +181,106 @@ def list_playlists(token):
             current_playlist += 1
 
 
+def local_token_validation(options: argparse.Namespace) -> None:
+    if options.token_data["expires_on"] >= datetime.now(tz=UTC):
+        print("Token is valid")
+    else:
+        print("Token is invalid. You need to request a new token or refresh this one.")
+
+
+def parse_json_from_file(filename: str) -> dict:
+    data = {}
+    try:
+        with open(filename, "r") as json_file:
+            data =  json.load(json_file)
+    except FileNotFoundError:
+        pass
+
+    return data
+
+
+def parse_token_data_from_file(filename: str) -> dict:
+    token_data = parse_json_from_file(filename)
+
+    expiry_string = token_data.get("expires_on", "1900-01-01T00:00:00.000000+0000")
+    token_expiry_date = datetime.strptime(expiry_string, "%Y-%m-%dT%H:%M:%S.%f%z")
+
+    token_data["expires_on"] = token_expiry_date
+
+    return token_data
+
+
+# TUI #########################################################################
+
+def parse_arguments(arguments: [str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.set_defaults(function=lambda _: parser.print_help())
+
+    parser.add_argument("--spotify-file", action="store", type=parse_json_from_file,
+                        dest="spotify_data", default=DEFAULT_SPOTIFY_APP_FILE,
+                        metavar="FILE", help="The file to use for storing secret app key.")
+    parser.add_argument("--token-file", action="store", type=parse_token_data_from_file,
+                        dest="token_data", default=DEFAULT_TOKEN_FILE,
+                        metavar="FILE", help="The file to use for storing token information.")
+
+    subparsers = parser.add_subparsers(title="Subcommands")
+
+    # Tokens ##################################################################
+    token_parser = subparsers.add_parser("token", help="Handle authentication tokens")
+    token_parser.set_defaults(function=lambda _: token_parser.print_help())
+    token_subparsers = token_parser.add_subparsers(title="Token management commands")
+
+    token_request_parser = token_subparsers.add_parser("request", help="Request new token, both access- and refresh-token.")
+    token_request_parser.add_argument("--port",
+                                      action="store", type=int, dest="redirect_server_port", metavar="PORT",
+                                      default=DEFAULT_REDIRECT_SERVER_PORT,
+                                      help=("Server port to use for the local redirect server."
+                                            " Default is %d." % DEFAULT_REDIRECT_SERVER_PORT))
+    token_request_parser.set_defaults(function=request_code)
+
+    token_refresh_parser = token_subparsers.add_parser("refresh", help="Refresh access-token using existing refresh-token")
+
+    token_validation_parser = token_subparsers.add_parser("validate", help="Check if the current token is valid")
+    token_validation_parser.set_defaults(function=local_token_validation)
+
+    # Tags ####################################################################
+    tag_parser = subparsers.add_parser("tags", help="Manage tags")
+    tag_parser.set_defaults(function=lambda _: tag_parser.print_help())
+    tag_subparsers = tag_parser.add_subparsers(title="Tag management commands")
+
+    tag_list_parser = tag_subparsers.add_parser("list", help="List current tags in local cache.")
+
+    tag_pull_parser = tag_subparsers.add_parser("pull", help="Pull current tags from Spotify.")
+
+    tag_push_parser = tag_subparsers.add_parser("push", help="Push current tags to Spotify.")
+
+    # Playlists ###############################################################
+    playlist_parser = subparsers.add_parser("playlists", help="Manage playlists")
+    playlist_parser.set_defaults(function=lambda _: playlist_parser.print_help())
+    playlist_subparsers = playlist_parser.add_subparsers(title="Playlist commands")
+
+    playlist_create_parser = playlist_subparsers.add_parser("create", help="Create a new (smart) playlist.")
+    playlist_create_parser.set_defaults(function=lambda _: playlist_create_parser.print_help())
+
+    options = parser.parse_args(arguments)
+
+    return options
+
+
 if __name__ == "__main__":
+    options = parse_arguments(sys.argv[1:])
+
+    options.function(options)
+
+
+if False:
     client_data = {}
-    with open(SPOTIFY_APP_FILE, "r") as client_file:
+    with open(options.spotify_file, "r") as client_file:
         client_data = json.load(client_file)
 
     token_data = {}
     try:
-        with open(TOKEN_FILE, "r") as token_file:
+        with open(options.token_file, "r") as token_file:
             token_data = json.load(token_file)
     except FileNotFoundError:
         print("Couldn't find token file...")
