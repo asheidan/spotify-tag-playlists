@@ -214,7 +214,7 @@ def parse_token_data_from_file(filename: str) -> dict:
 
 def parse_arguments(arguments: [str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.set_defaults(function=lambda _: parser.print_help())
+    parser.set_defaults(function=lambda _: parser.print_usage())
 
     parser.add_argument("--spotify-file", action="store", type=parse_json_from_file,
                         dest="spotify_data", default=DEFAULT_SPOTIFY_APP_FILE,
@@ -227,7 +227,7 @@ def parse_arguments(arguments: [str]) -> argparse.Namespace:
 
     # Tokens ##################################################################
     token_parser = subparsers.add_parser("token", help="Handle authentication tokens")
-    token_parser.set_defaults(function=lambda _: token_parser.print_help())
+    token_parser.set_defaults(function=lambda _: token_parser.print_usage())
     token_subparsers = token_parser.add_subparsers(title="Token management commands")
 
     token_request_parser = token_subparsers.add_parser("request", help="Request new token, both access- and refresh-token.")
@@ -245,7 +245,7 @@ def parse_arguments(arguments: [str]) -> argparse.Namespace:
 
     # Tags ####################################################################
     tag_parser = subparsers.add_parser("tags", help="Manage tags")
-    tag_parser.set_defaults(function=lambda _: tag_parser.print_help())
+    tag_parser.set_defaults(function=lambda _: tag_parser.print_usage())
     tag_subparsers = tag_parser.add_subparsers(title="Tag management commands")
 
     tag_list_parser = tag_subparsers.add_parser("list", help="List current tags in local cache.")
@@ -256,11 +256,11 @@ def parse_arguments(arguments: [str]) -> argparse.Namespace:
 
     # Playlists ###############################################################
     playlist_parser = subparsers.add_parser("playlists", help="Manage playlists")
-    playlist_parser.set_defaults(function=lambda _: playlist_parser.print_help())
+    playlist_parser.set_defaults(function=lambda _: playlist_parser.print_usage())
     playlist_subparsers = playlist_parser.add_subparsers(title="Playlist commands")
 
     playlist_create_parser = playlist_subparsers.add_parser("create", help="Create a new (smart) playlist.")
-    playlist_create_parser.set_defaults(function=lambda _: playlist_create_parser.print_help())
+    playlist_create_parser.set_defaults(function=lambda _: playlist_create_parser.print_usage())
 
     options = parser.parse_args(arguments)
 
