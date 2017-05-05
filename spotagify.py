@@ -5,7 +5,10 @@ import base64
 from datetime import datetime, timedelta, tzinfo
 import http.server
 import json
+import logging
+import sqlite3
 import sys
+from typing import Iterator
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -16,10 +19,17 @@ NEEDED_SCOPES = [
     "playlist-read-private",
 ]
 
+DEFAULT_CACHE_FILE = "cache.db"
 DEFAULT_SPOTIFY_APP_FILE = "spotify_app.json"
 DEFAULT_TOKEN_FILE = "access_token.json"
 
-CODE = None
+
+# Globals #####################################################################
+
+OPTIONS = argparse.Namespace()
+
+_code = None  # Used to escape class scope in redirect server handlers
+
 
 class UTCtz(tzinfo):
     """UTC"""
@@ -36,6 +46,7 @@ UTC = UTCtz()
 
 
 # HTTP ########################################################################
+http_logger = logging.getLogger("spotagify.http")
 
 def request(method, url, params=None, data=None, headers=None, raw_response=False):
     post_data = urllib.parse.urlencode(data).encode() if data is not None else None
@@ -43,6 +54,8 @@ def request(method, url, params=None, data=None, headers=None, raw_response=Fals
     headers = headers or {}
 
     url_string = "%s?%s" % (url, query_string) if query_string else url
+
+    http_logger.info("%s %s q=%s b=%s", method, url, params, data)
 
     request = urllib.request.Request(url_string, data=post_data, headers=headers, method=method)
     response_data = {}
@@ -73,7 +86,7 @@ def post(*args, **kwargs):
 # Authentication ##############################################################
 
 def request_code(client_id: str, redirect_server_port: int) -> str:
-    global CODE
+    global _code
 
     class RedirectRequestHandler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
@@ -90,16 +103,16 @@ def request_code(client_id: str, redirect_server_port: int) -> str:
 
     class CodeRecieverRequestHandler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
-            global CODE
+            global _code
             url_data = urllib.parse.urlparse(self.path)
             url_query = urllib.parse.parse_qs(url_data.query)
 
-            CODE = url_query["code"][0]
+            _code = url_query["code"][0]
 
             self.send_response(200)
             self.send_header('Content-type', 'text/plain')
             self.end_headers()
-            self.wfile.write(b"Successfully received token!\nYou can now close this window")
+            self.wfile.write(b"Successfully received token!\nYou can now close this window.")
 
     server_address = ("localhost", redirect_server_port)
 
@@ -113,7 +126,7 @@ def request_code(client_id: str, redirect_server_port: int) -> str:
     print("Shutting down server")
     server.server_close()
 
-    return CODE  # This makes me nausiated
+    return _code  # This makes me nausiated
 
 
 def request_tokens(code, client_id, client_secret, redirect_server_port):
@@ -137,7 +150,7 @@ def request_tokens(code, client_id, client_secret, redirect_server_port):
     return response_data
 
 
-def refresh_token(refresh_token, client_id, client_secret):
+def refresh_token(refresh_token: str, client_id: str, client_secret: str) -> dict:
     endpoint = "https://accounts.spotify.com/api/token"
     body_parameters = {
         "grant_type": "refresh_token",
@@ -162,9 +175,110 @@ def refresh_token(refresh_token, client_id, client_secret):
     return response_data
 
 
-###############################################################################
+# DB ##########################################################################
 
-def list_playlists(token):
+db_logger = logging.getLogger("spotagify.db")
+
+
+def tidy_sql(sql: str) -> str:
+    return " ".join((line.strip() for line in sql.splitlines()))
+
+
+def db_connection(options: argparse.Namespace=OPTIONS) -> sqlite3.Connection:
+    if hasattr(db_connection, "connection"):
+        return db_connection.connection
+
+    db_connection.connection = sqlite3.connect(options.cache_url)
+
+    create_tables_in_database(db_cursor(db_connection.connection))
+
+    return db_connection.connection
+
+
+def db_cursor(connection: sqlite3.Connection=None) -> sqlite3.Cursor:
+    connection = connection or db_connection()
+    cursor = connection.cursor()
+    return cursor
+
+
+def db_execute(sql: str, *args, cursor: sqlite3.Cursor=None, **kwargs) -> sqlite3.Cursor:
+    cursor = cursor or db_cursor()
+
+    sql_query = tidy_sql(sql)
+
+    db_logger.debug(sql_query)
+    if len(args):
+        db_logger.debug(args)
+
+    cursor.execute(sql, args, **kwargs)
+
+    return cursor
+
+
+def create_tables_in_database(cursor: sqlite3.Cursor=None) -> None:
+    cursor = cursor or db_cursor()
+
+    db_execute("""SELECT name FROM sqlite_master WHERE type=?;""", "table", cursor=cursor)
+    existing_tables = frozenset(map(lambda row: row[0], cursor))
+
+    if "playlists" not in existing_tables:
+        db_execute("""CREATE TABLE playlists (
+                              id TEXT PRIMARY KEY NOT NULL,
+                              name TEXT,
+                              snapshot_id TEXT,
+                              href TEXT);""",
+                   cursor=cursor)
+
+    if "artists" not in existing_tables:
+        db_execute("""CREATE TABLE artists (
+                              id TEXT PRIMARY KEY NOT NULL,
+                              name TEXT,
+                              type TEXT);""",
+                   cursor=cursor)
+
+    if "albums" not in existing_tables:
+        db_execute("""CREATE TABLE albums (
+                              id TEXT PRIMARY KEY NOT NULL,
+                              name TEXT,
+                              type TEXT);""",
+                   cursor=cursor)
+
+    if "album_artists" not in existing_tables:
+        db_execute("""CREATE TABLE album_artists (
+                              album_id TEXT, artist_id TEXT,
+                              FOREIGN KEY (album_id) REFERENCES albums(id),
+                              FOREIGN KEY (artist_id) REFERENCES artists(id));""",
+                   cursor=cursor)
+
+    if "songs" not in existing_tables:
+        db_execute("""CREATE TABLE songs (
+                              id TEXT PRIMARY KEY NOT NULL,
+                              artist_id TEXT);""",
+                   cursor=cursor)
+
+    if "song_artists" not in existing_tables:
+        db_execute("""CREATE TABLE song_artists (
+                              song_id TEXT, artist_id TEXT,
+                              FOREIGN KEY (song_id) REFERENCES songs(id),
+                              FOREIGN KEY (artist_id) REFERENCES artists(id));""",
+                   cursor=cursor)
+
+    cursor.connection.commit()
+
+
+def save_playlist_in_db(playlist: dict, cursor: sqlite3.Cursor=None) -> None:
+    db_logger.info("Saving playlist: %(name)s" % playlist)
+
+    cursor = db_execute("INSERT OR REPLACE INTO playlists(id, name, snapshot_id, href) VALUES(?, ?, ?, ?);",
+                        playlist["id"], playlist["name"], playlist["snapshot_id"], playlist["href"],
+                        cursor=cursor)
+
+    cursor.connection.commit()
+
+
+# Playlists ###################################################################
+
+def list_playlists(token: str) -> Iterator[dict]:
     endpoint = "https://api.spotify.com/v1/me/playlists"
     headers = {
         "Authorization": "%(token_type)s %(access_token)s" % token,
@@ -185,11 +299,16 @@ def list_playlists(token):
         total_number = response_data.get("total", 0)
         limit = response_data.get("limit", 20)
 
-
         for playlist_data in response_data.get("items", []):
             yield playlist_data
             current_playlist += 1
 
+
+def list_tracks_for_playlist(playlist: dict) -> Iterator[dict]:
+    tracks_url = playlist.get("tracks", {}).get("href")
+
+
+###############################################################################
 
 def parse_json_from_file(filename: str) -> dict:
     data = {}
@@ -250,16 +369,57 @@ def request_token_command(options: argparse.Namespace) -> None:
         json.dump(token_data, token_file)
 
 
-def parse_arguments(arguments: [str]) -> argparse.Namespace:
+def refresh_token_command(options: argparse.Namespace) -> None:
+    token_data = options.token_data
+    spotify_data = options.spotify_data
+
+    if "client_id" not in spotify_data:
+        print("Client data is invalid, missing client_id")
+        sys.exit(1)
+
+    if "client_secret" not in spotify_data:
+        print("Client data is invalid, missing client_secret")
+        sys.exit(1)
+
+    token_data = refresh_token(refresh_token=token_data["refresh_token"],
+                               client_id=spotify_data["client_id"],
+                               client_secret=spotify_data["client_secret"])
+
+    with open(options.token_path, "w") as token_file:
+        json.dump(token_data, token_file)
+
+
+
+def pull_tags_command(options: argparse.Namespace) -> None:
+    for playlist in list_playlists(options.token_data):
+        playlist_name = playlist.get("name", "")
+        if not playlist_name.startswith(options.playlist_prefix):
+            continue
+
+        save_playlist_in_db(playlist)
+        # list_tracks_for_playlist(playlist)
+
+
+def parse_arguments(arguments: [str], namespace: argparse.Namespace=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.set_defaults(command=lambda _: parser.print_usage())
 
+    parser.add_argument("--cache-db", action="store", type=str,
+                        dest="cache_url", default=DEFAULT_CACHE_FILE,
+                        metavar="FILE", help="The local sqlite3-db used for caching.")
+    # parser.add_argument("--log-level", action="store_const",
+    #                     dest="log_level", default=logging.INFO,
+    #                     metavar="LEVEL")
     parser.add_argument("--spotify-file", action="store", type=str,
                         dest="spotify_path", default=DEFAULT_SPOTIFY_APP_FILE,
                         metavar="FILE", help="The file to use for storing secret app key.")
     parser.add_argument("--token-file", action="store", type=str,
                         dest="token_path", default=DEFAULT_TOKEN_FILE,
                         metavar="FILE", help="The file to use for storing token information.")
+
+    parser.add_argument("--playlist-prefix", action="store", type=str,
+                        dest="playlist_prefix", metavar="PREFIX", default="SPOTIFYTAG ",
+                        help="The prefix to use on playlists in Spotify.")
 
     subparsers = parser.add_subparsers(title="Subcommands")
 
@@ -276,14 +436,15 @@ def parse_arguments(arguments: [str]) -> argparse.Namespace:
     token_subparsers = token_parser.add_subparsers(title="Token management commands")
 
     token_request_parser = token_subparsers.add_parser("request", help="Request new token, both access- and refresh-token.")
+    token_request_parser.set_defaults(command=request_token_command)
     token_request_parser.add_argument("--port",
                                       action="store", type=int, dest="redirect_server_port", metavar="PORT",
                                       default=DEFAULT_REDIRECT_SERVER_PORT,
                                       help=("Server port to use for the local redirect server."
                                             " Default is %d." % DEFAULT_REDIRECT_SERVER_PORT))
-    token_request_parser.set_defaults(command=request_token_command)
 
     token_refresh_parser = token_subparsers.add_parser("refresh", help="Refresh access-token using existing refresh-token")
+    token_refresh_parser.set_defaults(command=refresh_token_command)
 
     token_validation_parser = token_subparsers.add_parser("validate", help="Check if the current token is valid")
     token_validation_parser.set_defaults(command=local_token_validation_command)
@@ -296,6 +457,7 @@ def parse_arguments(arguments: [str]) -> argparse.Namespace:
     tag_list_parser = tag_subparsers.add_parser("list", help="List current tags in local cache.")
 
     tag_pull_parser = tag_subparsers.add_parser("pull", help="Pull current tags from Spotify.")
+    tag_pull_parser.set_defaults(command=pull_tags_command)
 
     tag_push_parser = tag_subparsers.add_parser("push", help="Push current tags to Spotify.")
 
@@ -307,15 +469,17 @@ def parse_arguments(arguments: [str]) -> argparse.Namespace:
     playlist_create_parser = playlist_subparsers.add_parser("create", help="Create a new (smart) playlist.")
     playlist_create_parser.set_defaults(command=lambda _: playlist_create_parser.print_usage())
 
-    options = parser.parse_args(arguments)
+    options = parser.parse_args(arguments, namespace=namespace)
 
     return options
 
 
 if __name__ == "__main__":
-    options = parse_arguments(sys.argv[1:])
+    parse_arguments(sys.argv[1:], namespace=OPTIONS)
 
-    options.spotify_data = parse_json_from_file(options.spotify_path)
-    options.token_data = parse_token_data_from_file(options.token_path)
+    logging.basicConfig(level=logging.DEBUG)
 
-    options.command(options)
+    OPTIONS.spotify_data = parse_json_from_file(OPTIONS.spotify_path)
+    OPTIONS.token_data = parse_token_data_from_file(OPTIONS.token_path)
+
+    OPTIONS.command(OPTIONS)
