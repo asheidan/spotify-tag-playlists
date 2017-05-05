@@ -225,6 +225,13 @@ def parse_arguments(arguments: [str]) -> argparse.Namespace:
 
     subparsers = parser.add_subparsers(title="Subcommands")
 
+    # Songs ###################################################################
+    song_parser = subparsers.add_parser("songs", help="Manage songs")
+    song_parser.set_defaults(function=lambda _: song_parser.print_usage())
+    song_subparsers = song_parser.add_subparsers(title="Song management commands")
+
+    song_list_parser = song_subparsers.add_parser("list", help="List current songs in local cache.")
+
     # Tokens ##################################################################
     token_parser = subparsers.add_parser("token", help="Handle authentication tokens")
     token_parser.set_defaults(function=lambda _: token_parser.print_usage())
