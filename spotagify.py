@@ -35,6 +35,8 @@ class UTCtz(tzinfo):
 UTC = UTCtz()
 
 
+# HTTP ########################################################################
+
 def request(method, url, params=None, data=None, headers=None, raw_response=False):
     post_data = urllib.parse.urlencode(data).encode() if data is not None else None
     query_string = urllib.parse.urlencode(params) if params is not None else None
@@ -59,12 +61,16 @@ def request(method, url, params=None, data=None, headers=None, raw_response=Fals
             print(error.reason)
             raise
 
+
 def get(*args, **kwargs):
     return request("GET", *args, **kwargs)
+
 
 def post(*args, **kwargs):
     return request("POST", *args, **kwargs)
 
+
+# Authentication ##############################################################
 
 def request_code(client_id: str, redirect_server_port: int) -> str:
     global CODE
@@ -156,6 +162,8 @@ def refresh_token(refresh_token, client_id, client_secret):
     return response_data
 
 
+###############################################################################
+
 def list_playlists(token):
     endpoint = "https://api.spotify.com/v1/me/playlists"
     headers = {
@@ -205,7 +213,7 @@ def parse_token_data_from_file(filename: str) -> dict:
     return token_data
 
 
-# TUI #########################################################################
+# CLI #########################################################################
 
 def local_token_validation_command(options: argparse.Namespace) -> None:
     if (
@@ -311,34 +319,3 @@ if __name__ == "__main__":
     options.token_data = parse_token_data_from_file(options.token_path)
 
     options.command(options)
-
-
-if False:
-    client_data = {}
-    with open(options.spotify_file, "r") as client_file:
-        client_data = json.load(client_file)
-
-    token_data = {}
-    try:
-        with open(options.token_file, "r") as token_file:
-            token_data = json.load(token_file)
-    except FileNotFoundError:
-        print("Couldn't find token file...")
-
-    expiry_string = token_data.get("expires_on", "1900-01-01T00:00:00.000000+0000")
-    token_expiry_date = datetime.strptime(expiry_string, "%Y-%m-%dT%H:%M:%S.%f%z")
-
-    if token_expiry_date <= datetime.now(tz=UTC):
-        print("Access token is out of date, requesting new...")
-        code = token_data.get("refresh_token")
-        if not code:
-            code = request_code(client_data.get("client_id"))
-            token_data = request_tokens(code, **client_data)
-        else:
-            token_data = refresh_token(code, **client_data)
-
-        with open(TOKEN_FILE, "w") as token_file:
-            json.dump(token_data, token_file)
-
-    for playlist in list_playlists(token_data):
-        print(playlist.get("name"))
