@@ -38,6 +38,7 @@ UTC = UTCtz()
 def request(method, url, params=None, data=None, headers=None, raw_response=False):
     post_data = urllib.parse.urlencode(data).encode() if data is not None else None
     query_string = urllib.parse.urlencode(params) if params is not None else None
+    headers = headers or {}
 
     url_string = "%s?%s" % (url, query_string) if query_string else url
 
