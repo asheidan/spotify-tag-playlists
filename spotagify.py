@@ -8,7 +8,7 @@ import json
 import logging
 import sqlite3
 import sys
-from typing import Iterator
+from typing import Iterator, Tuple
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -23,6 +23,9 @@ DEFAULT_CACHE_FILE = "cache.db"
 DEFAULT_SPOTIFY_APP_FILE = "spotify_app.json"
 DEFAULT_TOKEN_FILE = "access_token.json"
 
+SERIALIZERS = {
+    "json": lambda o, f: json.dump(o, f),
+}
 
 # Globals #####################################################################
 
@@ -81,6 +84,32 @@ def get(*args, **kwargs):
 
 def post(*args, **kwargs):
     return request("POST", *args, **kwargs)
+
+
+def iterate_spotify_endpoint(endpoint: str, limit: int=None, params=None,
+                             options: argparse.Namespace=OPTIONS) -> Iterator[dict]:
+    headers = {"Authorization": "%(token_type)s %(access_token)s" % options.token_data,}
+
+    total_number = 2**63 - 1  # Very high number, will be corrected after fetch
+    current_item = 0
+
+    while current_item < total_number:
+        query = {}
+        if params:
+            query.update(params)
+
+        query["offset"] = current_item
+
+        if limit is not None:
+            query["limit"] = limit
+
+        response_data = get(endpoint, params=query, headers=headers)
+
+        total_number = response_data.get("total", 0)
+
+        for item_data in response_data.get("items", []):
+            yield item_data
+            current_item += 1
 
 
 # Authentication ##############################################################
@@ -250,16 +279,16 @@ def create_tables_in_database(cursor: sqlite3.Cursor=None) -> None:
                               FOREIGN KEY (artist_id) REFERENCES artists(id));""",
                    cursor=cursor)
 
-    if "songs" not in existing_tables:
-        db_execute("""CREATE TABLE songs (
+    if "tracks" not in existing_tables:
+        db_execute("""CREATE TABLE tracks (
                               id TEXT PRIMARY KEY NOT NULL,
-                              artist_id TEXT);""",
+                              name TEXT);""",
                    cursor=cursor)
 
-    if "song_artists" not in existing_tables:
-        db_execute("""CREATE TABLE song_artists (
-                              song_id TEXT, artist_id TEXT,
-                              FOREIGN KEY (song_id) REFERENCES songs(id),
+    if "track_artists" not in existing_tables:
+        db_execute("""CREATE TABLE track_artists (
+                              track_id TEXT, artist_id TEXT,
+                              FOREIGN KEY (track_id) REFERENCES tracks(id),
                               FOREIGN KEY (artist_id) REFERENCES artists(id));""",
                    cursor=cursor)
 
@@ -276,36 +305,30 @@ def save_playlist_in_db(playlist: dict, cursor: sqlite3.Cursor=None) -> None:
     cursor.connection.commit()
 
 
+def track_to_db(track: dict) -> Tuple:
+    return track["id"], track["name"]
+
+
+
 # Playlists ###################################################################
 
-def list_playlists(token: str) -> Iterator[dict]:
+def list_playlists() -> Iterator[dict]:
+    """ Return iterator over the current user's playlists. """
     endpoint = "https://api.spotify.com/v1/me/playlists"
-    headers = {
-        "Authorization": "%(token_type)s %(access_token)s" % token,
-    }
 
-    total_number = 2**63 - 1  # Very high number, will be corrected after fetch
-    limit = 50
-    current_playlist = 0
-
-    while current_playlist < total_number:
-        query = {
-            "limit": limit,
-            "offset": current_playlist,
-        }
-
-        response_data = get(endpoint, params=query, headers=headers)
-
-        total_number = response_data.get("total", 0)
-        limit = response_data.get("limit", 20)
-
-        for playlist_data in response_data.get("items", []):
-            yield playlist_data
-            current_playlist += 1
+    return iterate_spotify_endpoint(endpoint)
 
 
 def list_tracks_for_playlist(playlist: dict) -> Iterator[dict]:
+    """ Return iterator over the tracks for a specific playlist. """
     tracks_url = playlist.get("tracks", {}).get("href")
+
+    params = {
+        # Limiting the data
+        "fields": "total,items(track(id,album(id,artists(id,name),name),artists(id,name),name,popularity,duration_ms))",
+    }
+
+    return iterate_spotify_endpoint(tracks_url, params=params)
 
 
 ###############################################################################
@@ -389,19 +412,46 @@ def refresh_token_command(options: argparse.Namespace) -> None:
         json.dump(token_data, token_file)
 
 
+def list_playlists_command(options: argparse.Namespace) -> None:
+    options.output_serializer(list(list_playlists()), sys.stdout)
+
 
 def pull_tags_command(options: argparse.Namespace) -> None:
-    for playlist in list_playlists(options.token_data):
-        playlist_name = playlist.get("name", "")
-        if not playlist_name.startswith(options.playlist_prefix):
-            continue
+    playlists = list()
+    artists = list()
+    albums = list()
 
-        save_playlist_in_db(playlist)
-        # list_tracks_for_playlist(playlist)
+    def is_tag_playlist(p): return p.get("name", "").startswith(options.playlist_prefix)
+
+    # Creating a list from iterable to be able to reuse
+    playlists = list(filter(is_tag_playlist, list_playlists()))
+
+    print("Gettings tracks for %d playlists" % len(playlists))
+    for playlist in playlists:
+        print("--- %s" % playlist.get("name"))
+        for entry in list_tracks_for_playlist(playlist):
+            print(entry.get("track", {}).get("name"))
+
+            track = entry["track"]
+
+            album = track.get("album")
+            albums.append(album)
+
+            track_artists = track.get("artists")
+            print(track_artists)
+            artists.append(track_artists)
+
+    # save_playlist_in_db(playlist)
 
 
 def parse_arguments(arguments: [str], namespace: argparse.Namespace=None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
+    output_parser = argparse.ArgumentParser(add_help=False)
+    output_type = lambda s: SERIALIZERS[s]
+    output_parser.add_argument("-o", "--output", action="store", #choices=SERIALIZERS,
+                               metavar="FORMAT", dest="output_serializer", type=output_type,
+                               default="json", help="The output format to use.")
+
+    parser = argparse.ArgumentParser(parents=[output_parser])
     parser.set_defaults(command=lambda _: parser.print_usage())
 
     parser.add_argument("--cache-db", action="store", type=str,
@@ -423,12 +473,12 @@ def parse_arguments(arguments: [str], namespace: argparse.Namespace=None) -> arg
 
     subparsers = parser.add_subparsers(title="Subcommands")
 
-    # Songs ###################################################################
-    song_parser = subparsers.add_parser("songs", help="Manage songs")
-    song_parser.set_defaults(command=lambda _: song_parser.print_usage())
-    song_subparsers = song_parser.add_subparsers(title="Song management commands")
+    # Tracks ###################################################################
+    track_parser = subparsers.add_parser("tracks", help="Manage tracks")
+    track_parser.set_defaults(command=lambda _: track_parser.print_usage())
+    track_subparsers = track_parser.add_subparsers(title="Track management commands")
 
-    song_list_parser = song_subparsers.add_parser("list", help="List current songs in local cache.")
+    track_list_parser = track_subparsers.add_parser("list", help="List current tracks in local cache.")
 
     # Tokens ##################################################################
     token_parser = subparsers.add_parser("token", help="Handle authentication tokens")
@@ -468,6 +518,9 @@ def parse_arguments(arguments: [str], namespace: argparse.Namespace=None) -> arg
 
     playlist_create_parser = playlist_subparsers.add_parser("create", help="Create a new (smart) playlist.")
     playlist_create_parser.set_defaults(command=lambda _: playlist_create_parser.print_usage())
+
+    playlist_list_parser = playlist_subparsers.add_parser("list", help="List all playlists.", parents=[output_parser])
+    playlist_list_parser.set_defaults(command=list_playlists_command)
 
     options = parser.parse_args(arguments, namespace=namespace)
 
