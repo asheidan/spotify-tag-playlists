@@ -13,6 +13,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
 DEFAULT_REDIRECT_SERVER_PORT = 8000
 REDIRECT_TO_ADDRESS = "https://accounts.spotify.com/authorize"
 NEEDED_SCOPES = [
@@ -26,6 +31,9 @@ DEFAULT_TOKEN_FILE = "access_token.json"
 SERIALIZERS = {
     "json": lambda o, f: json.dump(o, f),
 }
+if yaml:
+    SERIALIZERS["yaml"] = lambda o, f: yaml.dump(o, f)
+
 
 # Globals #####################################################################
 
