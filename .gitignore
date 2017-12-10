@@ -87,3 +87,8 @@ ENV/
 
 # Rope project settings
 .ropeproject
+
+# Project specific files
+access_token.json
+spotify_app.json
+cache.db
