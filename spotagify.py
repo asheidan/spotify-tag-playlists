@@ -66,7 +66,7 @@ else:
         else:
             if indent_first:
                 output_file.write("  " * level)
-            output_file.write(str(data))
+            json.dump(data, output_file)
             output_file.write("\n")
     SERIALIZERS["yaml"] = stupid_yaml_serializer
 
