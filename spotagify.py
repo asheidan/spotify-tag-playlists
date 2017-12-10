@@ -642,7 +642,8 @@ def parse_arguments(arguments: [str], namespace: argparse.Namespace=None) -> arg
     tag_parser.set_defaults(command=lambda _: tag_parser.print_usage())
     tag_subparsers = tag_parser.add_subparsers(title="Tag management commands")
 
-    tag_list_parser = tag_subparsers.add_parser("list", help="List current tags in local cache.")
+    tag_list_parser = tag_subparsers.add_parser("list", help="List current tags in local cache.",
+                                                parents=[output_parser])
     tag_list_parser.set_defaults(command=list_tags_command)
 
     tag_pull_parser = tag_subparsers.add_parser("pull", help="Pull current tags from Spotify.")
