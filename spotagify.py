@@ -332,6 +332,12 @@ def create_tables_in_database(cursor: sqlite3.Cursor=None) -> None:
                               FOREIGN KEY (artist_id) REFERENCES artists(id));""",
                    cursor=cursor)
 
+    if "playlist_tracks" not in existing_tables:
+        db_execute("""CREATE TABLE playlist_tracks (
+                              playlist_id TEXT, track_id TEXT,
+                              FOREIGN KEY (playlist_id) REFERENCES playlists(id),
+                              FOREIGN KEY (track_id) REFERENCES tracks(id));""")
+
     cursor.connection.commit()
 
 
@@ -339,10 +345,31 @@ def save_playlist_in_db(playlist: dict, cursor: sqlite3.Cursor=None) -> None:
     db_logger.info("Saving playlist: %(name)s" % playlist)
 
     cursor = db_execute("INSERT OR REPLACE INTO playlists(id, name, snapshot_id, href) VALUES(?, ?, ?, ?);",
-                        playlist["id"], playlist["name"], playlist["snapshot_id"], playlist["href"],
-                        cursor=cursor)
+                        *playlist_to_db(playlist), cursor=cursor)
 
     cursor.connection.commit()
+
+
+def save_track_in_db(track: dict, cursor: sqlite3.Cursor=None) -> None:
+    db_logger.info("Saving track: %(name)s" % track)
+
+    cursor = db_execute("INSERT OR REPLACE INTO tracks(id, name) VALUES(?, ?);",
+                        *track_to_db(track), cursor=cursor)
+
+    cursor.connection.commit()
+
+
+def add_track_to_playlist(playlist=None, track=None, cursor: sqlite3.Cursor=None) -> None:
+    db_logger.info("Adding track to playlist: %s, %s" , track.get("name"), playlist.get("name"))
+
+    cursor = db_execute("INSERT OR REPLACE INTO playlist_tracks(playlist_id, track_id) VALUES(?, ?);",
+                        playlist["id"], track["id"], cursor=cursor)
+
+    cursor.connection.commit()
+
+
+def playlist_to_db(playlist: dict) -> Tuple:
+    return playlist["id"], playlist["name"], playlist["snapshot_id"], playlist["href"]
 
 
 def track_to_db(track: dict) -> Tuple:
@@ -354,8 +381,11 @@ def track_to_db(track: dict) -> Tuple:
 def list_playlists() -> Iterator[dict]:
     """ Return iterator over the current user's playlists. """
     endpoint = "https://api.spotify.com/v1/me/playlists"
+    params = {
+        "fields": "total,items(id,name,snapshot_id,tracks,href)"
+    }
 
-    return iterate_spotify_endpoint(endpoint)
+    return iterate_spotify_endpoint(endpoint, params=params)
 
 
 def list_tracks_for_playlist(playlist: dict) -> Iterator[dict]:
@@ -364,7 +394,8 @@ def list_tracks_for_playlist(playlist: dict) -> Iterator[dict]:
 
     params = {
         # Limiting the data
-        "fields": "total,items(track(id,album(id,artists(id,name),name),artists(id,name),name,popularity,duration_ms))",
+        # "fields": "total,items(track(id,album(id,artists(id,name),name),artists(id,name),name,popularity,duration_ms))",
+        "fields": "total,items.track(id,name)",
     }
 
     return iterate_spotify_endpoint(tracks_url, params=params)
@@ -469,22 +500,38 @@ def pull_tags_command(options: argparse.Namespace) -> None:
     # Creating a list from iterable to be able to reuse
     playlists = list(filter(is_tag_playlist, list_playlists()))
 
-    print("Gettings tracks for %d playlists" % len(playlists))
+    playlist_snapshots = {}
+    sql = "SELECT id, snapshot_id FROM playlists;"
+    for playlist_id, snapshot_id in db_execute(sql):
+        playlist_snapshots[playlist_id] = snapshot_id
+
     for playlist in playlists:
+        playlist_id = playlist["id"]
+        snapshot_id = playlist["snapshot_id"]
+
+        if playlist_snapshots.get(playlist_id) == snapshot_id:
+            continue
+
+        save_playlist_in_db(playlist)
         print("--- %s" % playlist.get("name"))
+
         for entry in list_tracks_for_playlist(playlist):
             print(entry.get("track", {}).get("name"))
 
             track = entry["track"]
 
-            album = track.get("album")
-            albums.append(album)
+            save_track_in_db(track)
 
-            track_artists = track.get("artists")
-            print(track_artists)
-            artists.append(track_artists)
+            add_track_to_playlist(playlist=playlist, track=track)
 
-    # save_playlist_in_db(playlist)
+        #     album = track.get("album")
+        #     albums.append(album)
+
+        #     track_artists = track.get("artists")
+        #     print(track_artists)
+        #     artists.append(track_artists)
+
+
 
 
 def parse_arguments(arguments: [str], namespace: argparse.Namespace=None) -> argparse.Namespace:
