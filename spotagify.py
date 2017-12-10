@@ -38,6 +38,37 @@ SERIALIZERS = {
 }
 if yaml:
     SERIALIZERS["yaml"] = lambda o, f: yaml.dump(o, f)
+else:
+    def stupid_yaml_serializer(data, output_file, level=0, indent_first=True):
+        if type(data) is list:
+            for item in data:
+                if indent_first:
+                    output_file.write("  " * level)
+                output_file.write("- ")
+                stupid_yaml_serializer(item, output_file,
+                                       level=level + 1, indent_first=False)
+                indent_first |= True
+        elif type(data) is dict:
+            for key, value in data.items():
+                if indent_first:
+                    output_file.write("  " * level)
+                output_file.write(key)
+                output_file.write(":")
+                if type(value) in [list, dict]:
+                    output_file.write("\n")
+                    stupid_yaml_serializer(value, output_file,
+                                           level + 1, indent_first=True)
+                else:
+                    output_file.write(" ")
+                    stupid_yaml_serializer(value, output_file,
+                                           level + 1, indent_first=False)
+                indent_first |= True
+        else:
+            if indent_first:
+                output_file.write("  " * level)
+            output_file.write(str(data))
+            output_file.write("\n")
+    SERIALIZERS["yaml"] = stupid_yaml_serializer
 
 LOG_LEVELS = {
     "debug": logging.DEBUG,
