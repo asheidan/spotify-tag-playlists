@@ -559,7 +559,7 @@ def parse_arguments(arguments: [str], namespace: argparse.Namespace=None) -> arg
                                  dest="log_level", default=logging.INFO,
                                  metavar="LEVEL", help="The logging level to use.")
 
-    parser = argparse.ArgumentParser(parents=[output_parser, loglevel_parser], description=DESCRIPTION)
+    parser = argparse.ArgumentParser(parents=[loglevel_parser], description=DESCRIPTION)
     parser.set_defaults(command=lambda _: parser.print_usage())
 
     parser.add_argument("--cache-db", action="store", type=str,
@@ -583,7 +583,8 @@ def parse_arguments(arguments: [str], namespace: argparse.Namespace=None) -> arg
     track_parser.set_defaults(command=lambda _: track_parser.print_usage())
     track_subparsers = track_parser.add_subparsers(title="Track management commands")
 
-    track_list_parser = track_subparsers.add_parser("list", help="List current tracks in local cache.")
+    track_list_parser = track_subparsers.add_parser("list", help="List current tracks in local cache.",
+                                                    parents=[output_parser])
     track_list_parser.set_defaults(command=list_tracks_command)
 
     # Tokens ##################################################################
@@ -626,7 +627,7 @@ def parse_arguments(arguments: [str], namespace: argparse.Namespace=None) -> arg
     playlist_create_parser = playlist_subparsers.add_parser("create", help="Create a new (smart) playlist.")
     playlist_create_parser.set_defaults(command=lambda _: playlist_create_parser.print_usage())
 
-    playlist_list_parser = playlist_subparsers.add_parser("list", help="List all playlists.", parents=[output_parser, loglevel_parser])
+    playlist_list_parser = playlist_subparsers.add_parser("list", help="List all playlists.", parents=[output_parser])
     playlist_list_parser.set_defaults(command=list_playlists_command)
 
     options = parser.parse_args(arguments, namespace=namespace)
