@@ -18,6 +18,11 @@ try:
 except ImportError:
     yaml = None
 
+DESCRIPTION = """ This is more or less just a client for the Spotify web API with
+                  some local caching and filters. I personally use it to create
+                  tagging functionality by storing them as playlists.
+              """
+
 DEFAULT_REDIRECT_SERVER_PORT = 8000
 REDIRECT_TO_ADDRESS = "https://accounts.spotify.com/authorize"
 NEEDED_SCOPES = [
@@ -34,6 +39,12 @@ SERIALIZERS = {
 if yaml:
     SERIALIZERS["yaml"] = lambda o, f: yaml.dump(o, f)
 
+LOG_LEVELS = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+}
 
 # Globals #####################################################################
 
@@ -56,6 +67,25 @@ class UTCtz(tzinfo):
 UTC = UTCtz()
 
 
+logger = logging.getLogger("spotagify")
+
+# Stuff #######################################################################
+
+class StoreDictValue(argparse.Action):
+    def __init__(self, option_strings, dest, nargs=None, choices=None, **kwargs):
+        if nargs is not None:
+            raise ValueError("nargs not allowed")
+        if choices is None:
+            raise ValueError("choices is needed")
+
+        self.value_mapping = choices
+        choices = choices.keys()
+
+        super(StoreDictValue, self).__init__(option_strings, dest, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, self.value_mapping[values])
+
 # HTTP ########################################################################
 http_logger = logging.getLogger("spotagify.http")
 
@@ -66,7 +96,9 @@ def request(method, url, params=None, data=None, headers=None, raw_response=Fals
 
     url_string = "%s?%s" % (url, query_string) if query_string else url
 
-    http_logger.info("%s %s q=%s b=%s", method, url, params, data)
+    http_logger.debug("%s %s q=%s b=%s", method, url, params, data)
+    for key, value in headers.items():
+        http_logger.debug("%16s: %s", key, value)
 
     request = urllib.request.Request(url_string, data=post_data, headers=headers, method=method)
     response_data = {}
@@ -317,7 +349,6 @@ def track_to_db(track: dict) -> Tuple:
     return track["id"], track["name"]
 
 
-
 # Playlists ###################################################################
 
 def list_playlists() -> Iterator[dict]:
@@ -399,6 +430,8 @@ def request_token_command(options: argparse.Namespace) -> None:
     with open(options.token_path, "w") as token_file:
         json.dump(token_data, token_file)
 
+    logger.info("Token requested successfully")
+
 
 def refresh_token_command(options: argparse.Namespace) -> None:
     token_data = options.token_data
@@ -418,6 +451,8 @@ def refresh_token_command(options: argparse.Namespace) -> None:
 
     with open(options.token_path, "w") as token_file:
         json.dump(token_data, token_file)
+
+    logger.info("Token refreshed successfully")
 
 
 def list_playlists_command(options: argparse.Namespace) -> None:
@@ -458,16 +493,17 @@ def parse_arguments(arguments: [str], namespace: argparse.Namespace=None) -> arg
     output_parser.add_argument("-o", "--output", action="store", #choices=SERIALIZERS,
                                metavar="FORMAT", dest="output_serializer", type=output_type,
                                default="json", help="The output format to use.")
+    loglevel_parser = argparse.ArgumentParser(add_help=False)
+    loglevel_parser.add_argument("--log-level", action=StoreDictValue, choices=LOG_LEVELS,
+                                 dest="log_level", default=logging.INFO,
+                                 metavar="LEVEL", help="The logging level to use.")
 
-    parser = argparse.ArgumentParser(parents=[output_parser])
+    parser = argparse.ArgumentParser(parents=[output_parser, loglevel_parser], description=DESCRIPTION)
     parser.set_defaults(command=lambda _: parser.print_usage())
 
     parser.add_argument("--cache-db", action="store", type=str,
                         dest="cache_url", default=DEFAULT_CACHE_FILE,
                         metavar="FILE", help="The local sqlite3-db used for caching.")
-    # parser.add_argument("--log-level", action="store_const",
-    #                     dest="log_level", default=logging.INFO,
-    #                     metavar="LEVEL")
     parser.add_argument("--spotify-file", action="store", type=str,
                         dest="spotify_path", default=DEFAULT_SPOTIFY_APP_FILE,
                         metavar="FILE", help="The file to use for storing secret app key.")
@@ -538,7 +574,7 @@ def parse_arguments(arguments: [str], namespace: argparse.Namespace=None) -> arg
 if __name__ == "__main__":
     parse_arguments(sys.argv[1:], namespace=OPTIONS)
 
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=OPTIONS.log_level)
 
     OPTIONS.spotify_data = parse_json_from_file(OPTIONS.spotify_path)
     OPTIONS.token_data = parse_token_data_from_file(OPTIONS.token_path)
