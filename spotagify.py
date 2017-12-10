@@ -490,6 +490,14 @@ def list_playlists_command(options: argparse.Namespace) -> None:
     options.output_serializer(list(list_playlists()), sys.stdout)
 
 
+def list_tags_command(options: argparse.Namespace) -> None:
+    sql = ("SELECT name, id, snapshot_id FROM playlists WHERE name LIKE '%s%%';" %
+           options.playlist_prefix)
+    data = [{"id": id, "name": name[len(options.playlist_prefix):], "snapshot_id": snapshot_id}
+            for name, id, snapshot_id in db_execute(sql)]
+    options.output_serializer(data, sys.stdout)
+
+
 def pull_tags_command(options: argparse.Namespace) -> None:
     playlists = list()
     artists = list()
@@ -532,6 +540,12 @@ def pull_tags_command(options: argparse.Namespace) -> None:
         #     artists.append(track_artists)
 
 
+def list_tracks_command(options: argparse.Namespace) -> None:
+    sql = "SELECT id, name FROM tracks;"
+    data = [{"id": id, "name": name}
+            for id, name in db_execute(sql)]
+    options.output_serializer(data, sys.stdout)
+
 
 
 def parse_arguments(arguments: [str], namespace: argparse.Namespace=None) -> argparse.Namespace:
@@ -570,6 +584,7 @@ def parse_arguments(arguments: [str], namespace: argparse.Namespace=None) -> arg
     track_subparsers = track_parser.add_subparsers(title="Track management commands")
 
     track_list_parser = track_subparsers.add_parser("list", help="List current tracks in local cache.")
+    track_list_parser.set_defaults(command=list_tracks_command)
 
     # Tokens ##################################################################
     token_parser = subparsers.add_parser("token", help="Handle authentication tokens")
@@ -596,6 +611,7 @@ def parse_arguments(arguments: [str], namespace: argparse.Namespace=None) -> arg
     tag_subparsers = tag_parser.add_subparsers(title="Tag management commands")
 
     tag_list_parser = tag_subparsers.add_parser("list", help="List current tags in local cache.")
+    tag_list_parser.set_defaults(command=list_tags_command)
 
     tag_pull_parser = tag_subparsers.add_parser("pull", help="Pull current tags from Spotify.")
     tag_pull_parser.set_defaults(command=pull_tags_command)
@@ -610,7 +626,7 @@ def parse_arguments(arguments: [str], namespace: argparse.Namespace=None) -> arg
     playlist_create_parser = playlist_subparsers.add_parser("create", help="Create a new (smart) playlist.")
     playlist_create_parser.set_defaults(command=lambda _: playlist_create_parser.print_usage())
 
-    playlist_list_parser = playlist_subparsers.add_parser("list", help="List all playlists.", parents=[output_parser])
+    playlist_list_parser = playlist_subparsers.add_parser("list", help="List all playlists.", parents=[output_parser, loglevel_parser])
     playlist_list_parser.set_defaults(command=list_playlists_command)
 
     options = parser.parse_args(arguments, namespace=namespace)
