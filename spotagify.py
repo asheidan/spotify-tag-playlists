@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# pylint: disable=missing-docstring
 
 import argparse
 import base64
@@ -8,7 +9,7 @@ import json
 import logging
 import sqlite3
 import sys
-from typing import Iterator, Tuple
+from typing import Iterator, Tuple, Dict
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -33,6 +34,8 @@ DEFAULT_CACHE_FILE = "cache.db"
 DEFAULT_SPOTIFY_APP_FILE = "spotify_app.json"
 DEFAULT_TOKEN_FILE = "access_token.json"
 
+## Serializing ################################################################
+
 SERIALIZERS = {
     "json": lambda o, f: json.dump(o, f),
 }
@@ -40,7 +43,7 @@ if yaml:
     SERIALIZERS["yaml"] = lambda o, f: yaml.dump(o, f)
 else:
     def stupid_yaml_serializer(data, output_file, level=0, indent_first=True):
-        if type(data) is list:
+        if isinstance(data, list):
             for item in data:
                 if indent_first:
                     output_file.write("  " * level)
@@ -48,13 +51,13 @@ else:
                 stupid_yaml_serializer(item, output_file,
                                        level=level + 1, indent_first=False)
                 indent_first |= True
-        elif type(data) is dict:
+        elif isinstance(data, dict):
             for key, value in data.items():
                 if indent_first:
                     output_file.write("  " * level)
                 output_file.write(key)
                 output_file.write(":")
-                if type(value) in [list, dict]:
+                if isinstance(value, (list, dict)):
                     output_file.write("\n")
                     stupid_yaml_serializer(value, output_file,
                                            level + 1, indent_first=True)
@@ -131,22 +134,22 @@ def request(method, url, params=None, data=None, headers=None, raw_response=Fals
     for key, value in headers.items():
         http_logger.debug("%16s: %s", key, value)
 
-    request = urllib.request.Request(url_string, data=post_data, headers=headers, method=method)
+    prepared_request = urllib.request.Request(url_string, data=post_data, headers=headers, method=method)
     response_data = {}
 
     if raw_response:
-        return urllib.request.urlopen(request)
-    else:
-        try:
-            response = urllib.request.urlopen(request)
-            response_data = json.loads(response.read().decode('UTF-8'))
+        return urllib.request.urlopen(prepared_request)
 
-            return response_data
-        except urllib.error.HTTPError as error:
-            print(error)
-            print(error.headers)
-            print(error.reason)
-            raise
+    try:
+        response = urllib.request.urlopen(prepared_request)
+        response_data = json.loads(response.read().decode('UTF-8'))
+
+        return response_data
+    except urllib.error.HTTPError as error:
+        print(error)
+        print(error.headers)
+        print(error.reason)
+        raise
 
 
 def get(*args, **kwargs):
@@ -157,9 +160,9 @@ def post(*args, **kwargs):
     return request("POST", *args, **kwargs)
 
 
-def iterate_spotify_endpoint(endpoint: str, limit: int=None, params=None,
-                             options: argparse.Namespace=OPTIONS) -> Iterator[dict]:
-    headers = {"Authorization": "%(token_type)s %(access_token)s" % options.token_data,}
+def iterate_spotify_endpoint(endpoint: str, limit: int = None, params: Dict[str, str] = None,
+                             options: argparse.Namespace = OPTIONS) -> Iterator[Dict]:
+    headers = {"Authorization": "%(token_type)s %(access_token)s" % options.token_data}
 
     total_number = 2**63 - 1  # Very high number, will be corrected after fetch
     current_item = 0
@@ -189,7 +192,7 @@ def request_code(client_id: str, redirect_server_port: int) -> str:
     global _code
 
     class RedirectRequestHandler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
+        def do_GET(self):  # pylint: disable=invalid-name
             request_data = urllib.parse.urlencode({
                 "client_id": client_id,
                 "response_type": "code",
@@ -202,7 +205,7 @@ def request_code(client_id: str, redirect_server_port: int) -> str:
             self.end_headers()
 
     class CodeRecieverRequestHandler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
+        def do_GET(self):  # pylint: disable=invalid-name
             global _code
             url_data = urllib.parse.urlparse(self.path)
             url_query = urllib.parse.parse_qs(url_data.query)
@@ -250,7 +253,7 @@ def request_tokens(code, client_id, client_secret, redirect_server_port):
     return response_data
 
 
-def refresh_token(refresh_token: str, client_id: str, client_secret: str) -> dict:
+def refresh_token(refresh_token: str, client_id: str, client_secret: str) -> Dict:
     endpoint = "https://accounts.spotify.com/api/token"
     body_parameters = {
         "grant_type": "refresh_token",
@@ -307,7 +310,7 @@ def db_execute(sql: str, *args, cursor: sqlite3.Cursor=None, **kwargs) -> sqlite
     sql_query = tidy_sql(sql)
 
     db_logger.debug(sql_query)
-    if len(args):
+    if args:
         db_logger.debug(args)
 
     cursor.execute(sql, args, **kwargs)
@@ -319,7 +322,7 @@ def create_tables_in_database(cursor: sqlite3.Cursor=None) -> None:
     cursor = cursor or db_cursor()
 
     db_execute("""SELECT name FROM sqlite_master WHERE type=?;""", "table", cursor=cursor)
-    existing_tables = frozenset(map(lambda row: row[0], cursor))
+    existing_tables = frozenset(row[0] for row in cursor)
 
     if "playlists" not in existing_tables:
         db_execute("""CREATE TABLE playlists (
@@ -372,7 +375,7 @@ def create_tables_in_database(cursor: sqlite3.Cursor=None) -> None:
     cursor.connection.commit()
 
 
-def save_playlist_in_db(playlist: dict, cursor: sqlite3.Cursor=None) -> None:
+def save_playlist_in_db(playlist: Dict, cursor: sqlite3.Cursor=None) -> None:
     db_logger.info("Saving playlist: %(name)s" % playlist)
 
     cursor = db_execute("INSERT OR REPLACE INTO playlists(id, name, snapshot_id, href) VALUES(?, ?, ?, ?);",
@@ -381,7 +384,7 @@ def save_playlist_in_db(playlist: dict, cursor: sqlite3.Cursor=None) -> None:
     cursor.connection.commit()
 
 
-def save_track_in_db(track: dict, cursor: sqlite3.Cursor=None) -> None:
+def save_track_in_db(track: Dict, cursor: sqlite3.Cursor=None) -> None:
     db_logger.info("Saving track: %(name)s" % track)
 
     cursor = db_execute("INSERT OR REPLACE INTO tracks(id, name) VALUES(?, ?);",
@@ -399,17 +402,17 @@ def add_track_to_playlist(playlist=None, track=None, cursor: sqlite3.Cursor=None
     cursor.connection.commit()
 
 
-def playlist_to_db(playlist: dict) -> Tuple:
+def playlist_to_db(playlist: Dict) -> Tuple:
     return playlist["id"], playlist["name"], playlist["snapshot_id"], playlist["href"]
 
 
-def track_to_db(track: dict) -> Tuple:
+def track_to_db(track: Dict) -> Tuple:
     return track["id"], track["name"]
 
 
 # Playlists ###################################################################
 
-def list_playlists() -> Iterator[dict]:
+def list_playlists() -> Iterator[Dict]:
     """ Return iterator over the current user's playlists. """
     endpoint = "https://api.spotify.com/v1/me/playlists"
     params = {
@@ -419,7 +422,7 @@ def list_playlists() -> Iterator[dict]:
     return iterate_spotify_endpoint(endpoint, params=params)
 
 
-def list_tracks_for_playlist(playlist: dict) -> Iterator[dict]:
+def list_tracks_for_playlist(playlist: Dict) -> Iterator[Dict]:
     """ Return iterator over the tracks for a specific playlist. """
     tracks_url = playlist.get("tracks", {}).get("href")
 
@@ -434,7 +437,7 @@ def list_tracks_for_playlist(playlist: dict) -> Iterator[dict]:
 
 ###############################################################################
 
-def parse_json_from_file(filename: str) -> dict:
+def parse_json_from_file(filename: str) -> Dict:
     data = {}
     try:
         with open(filename, "r") as json_file:
@@ -445,7 +448,7 @@ def parse_json_from_file(filename: str) -> dict:
     return data
 
 
-def parse_token_data_from_file(filename: str) -> dict:
+def parse_token_data_from_file(filename: str) -> Dict:
     token_data = parse_json_from_file(filename)
 
     expiry_string = token_data.get("expires_on", "1900-01-01T00:00:00.000000+0000")
@@ -522,6 +525,7 @@ def list_playlists_command(options: argparse.Namespace) -> None:
 
 
 def list_tags_command(options: argparse.Namespace) -> None:
+    """ List playlists matching the tag pattern from the DB. """
     sql = ("SELECT name, id, snapshot_id FROM playlists WHERE name LIKE '%s%%';" %
            options.playlist_prefix)
     data = [{"id": id, "name": name[len(options.playlist_prefix):], "snapshot_id": snapshot_id}
@@ -530,21 +534,17 @@ def list_tags_command(options: argparse.Namespace) -> None:
 
 
 def pull_tags_command(options: argparse.Namespace) -> None:
-    playlists = list()
-    artists = list()
-    albums = list()
+    """ Fetch tag-playlists from spotify and store them in DB. """
+    def is_tag_playlist(playlist):
+        return playlist.get("name", "").startswith(options.playlist_prefix)
 
-    def is_tag_playlist(p): return p.get("name", "").startswith(options.playlist_prefix)
-
-    # Creating a list from iterable to be able to reuse
-    playlists = list(filter(is_tag_playlist, list_playlists()))
-
-    playlist_snapshots = {}
     sql = "SELECT id, snapshot_id FROM playlists;"
-    for playlist_id, snapshot_id in db_execute(sql):
-        playlist_snapshots[playlist_id] = snapshot_id
+    playlist_snapshots = {playlist_id: snapshot_id
+                          for playlist_id, snapshot_id in db_execute(sql)}
 
-    for playlist in playlists:
+    artists = dict()
+
+    for playlist in filter(is_tag_playlist, list_playlists()):
         playlist_id = playlist["id"]
         snapshot_id = playlist["snapshot_id"]
 
@@ -563,12 +563,11 @@ def pull_tags_command(options: argparse.Namespace) -> None:
 
             add_track_to_playlist(playlist=playlist, track=track)
 
-        #     album = track.get("album")
-        #     albums.append(album)
+            #     album = track.get("album")
+            #     albums.append(album)
 
-        #     track_artists = track.get("artists")
-        #     print(track_artists)
-        #     artists.append(track_artists)
+            artists.update({track_artist.get("id"): track_artist
+                            for track_artist in track.get("artists", [])})
 
 
 def list_tracks_command(options: argparse.Namespace) -> None:
@@ -581,8 +580,10 @@ def list_tracks_command(options: argparse.Namespace) -> None:
 
 def parse_arguments(arguments: [str], namespace: argparse.Namespace=None) -> argparse.Namespace:
     output_parser = argparse.ArgumentParser(add_help=False)
-    output_type = lambda s: SERIALIZERS[s]
-    output_parser.add_argument("-o", "--output", action="store", #choices=SERIALIZERS,
+
+    def output_type(serializer_name):
+        return SERIALIZERS[serializer_name]
+    output_parser.add_argument("-o", "--output", action="store",  # choices=SERIALIZERS,
                                metavar="FORMAT", dest="output_serializer", type=output_type,
                                default="json", help="The output format to use.")
     loglevel_parser = argparse.ArgumentParser(add_help=False)
