@@ -3,12 +3,19 @@
 
 import argparse
 import base64
+import csv
 from datetime import datetime, timedelta, tzinfo
 import http.server
 import json
 import logging
 import sys
-from typing import Iterator, Tuple, Dict
+from itertools import islice
+from typing import Dict
+from typing import Iterable
+from typing import Iterator
+from typing import Sequence
+from typing import Union
+from urllib.parse import urlencode
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -27,16 +34,33 @@ DEFAULT_REDIRECT_SERVER_PORT = 8000
 REDIRECT_TO_ADDRESS = "https://accounts.spotify.com/authorize"
 NEEDED_SCOPES = [
     "playlist-read-private",
+    "playlist-modify-private",
+    "playlist-modify-public",
 ]
 
-DEFAULT_CACHE_FILE = "cache.db"
 DEFAULT_SPOTIFY_APP_FILE = "spotify_app.json"
 DEFAULT_TOKEN_FILE = "access_token.json"
 
+DEFAULT_CACHE_FILE = "cache.db"
+
+CURRENT_USER = None
+
+
 # Serializing #################################################################
+
+def csv_serializer(data, output_file):
+    data_iterator = iter(data)
+    first_line = next(data_iterator)
+    writer = csv.DictWriter(output_file, first_line.keys())
+
+    writer.writeheader()
+    for row in data_iterator:
+        writer.writerow(row)
+
 
 SERIALIZERS = {
     "json": json.dump,
+    "csv": csv_serializer,
 }
 if yaml:
     SERIALIZERS["yaml"] = yaml.dump
@@ -124,8 +148,9 @@ class StoreDictValue(argparse.Action):
 # HTTP ########################################################################
 http_logger = logging.getLogger("spotagify.http")
 
-def request(method, url, params=None, data=None, headers=None, raw_response=False):
-    post_data = urllib.parse.urlencode(data).encode() if data is not None else None
+
+def request(method, url, params=None, data=None, headers=None, raw_response=False, body_serializer=json.dumps):
+    post_data = body_serializer(data).encode() if data is not None else None
     query_string = urllib.parse.urlencode(params) if params is not None else None
     headers = headers or {}
 
@@ -135,7 +160,8 @@ def request(method, url, params=None, data=None, headers=None, raw_response=Fals
     for key, value in headers.items():
         http_logger.debug("%16s: %s", key, value)
 
-    prepared_request = urllib.request.Request(url_string, data=post_data, headers=headers, method=method)
+    prepared_request = urllib.request.Request(
+        url_string, data=post_data, headers=headers, method=method)
     response_data = {}
 
     if raw_response:
@@ -148,6 +174,7 @@ def request(method, url, params=None, data=None, headers=None, raw_response=Fals
         return response_data
     except urllib.error.HTTPError as error:
         print(error)
+        print(url)
         print(error.headers)
         print(error.reason)
         raise
@@ -244,7 +271,7 @@ def request_tokens(code, client_id, client_secret, redirect_server_port):
         "client_secret": client_secret,
     }
 
-    response_data = post(endpoint, data=post_data)
+    response_data = post(endpoint, data=post_data, body_serializer=urlencode)
 
     expiry_date = datetime.now(tz=UTC) + timedelta(seconds=response_data.get("expires_in", 0))
     expiry_string = expiry_date.isoformat()
@@ -265,7 +292,7 @@ def refresh_token(refresh_token: str, client_id: str, client_secret: str) -> Dic
         "Authorization": b"Basic " + base64.b64encode(("%s:%s" % (client_id, client_secret)).encode()),
     }
 
-    response_data = post(endpoint, data=body_parameters, headers=headers)
+    response_data = post(endpoint, data=body_parameters, headers=headers, body_serializer=urlencode)
 
     expiry_date = datetime.now(tz=UTC) + timedelta(seconds=response_data.get("expires_in", 0))
     expiry_string = expiry_date.isoformat()
@@ -277,6 +304,26 @@ def refresh_token(refresh_token: str, client_id: str, client_secret: str) -> Dic
         response_data["refresh_token"] = refresh_token
 
     return response_data
+
+
+# User ########################################################################
+
+def get_user(options: argparse.Namespace = OPTIONS) -> Dict:
+    headers = {
+        "Authorization": "%(token_type)s %(access_token)s" % options.token_data,
+    }
+    endpoint = "https://api.spotify.com/v1/me"
+
+    response_data = get(endpoint, headers=headers)
+    return response_data
+
+
+def get_user_info(key: str):
+    global CURRENT_USER
+    if CURRENT_USER is None:
+        CURRENT_USER = get_user()
+
+    return CURRENT_USER.get(key)
 
 
 # Playlists ###################################################################
@@ -291,6 +338,17 @@ def list_playlists() -> Iterator[Dict]:
     return iterate_spotify_endpoint(endpoint, params=params)
 
 
+def show_playlist(playlist_id: str) -> Iterator[Dict]:
+    """ Return iterator over the tracks of a playlist. """
+    endpoint = "https://api.spotify.com/v1/playlists/%s/tracks"
+    params = {
+        "fields": "total,items.track(id,uri,name)",
+    }
+    tracks_url = endpoint % playlist_id
+    return map(lambda t: t.get("track"),
+               iterate_spotify_endpoint(tracks_url, params=params))
+
+
 def list_tracks_for_playlist(playlist: Dict) -> Iterator[Dict]:
     """ Return iterator over the tracks for a specific playlist. """
     tracks_url = playlist.get("tracks", {}).get("href")
@@ -302,6 +360,49 @@ def list_tracks_for_playlist(playlist: Dict) -> Iterator[Dict]:
     }
 
     return iterate_spotify_endpoint(tracks_url, params=params)
+
+
+def create_playlist(name: str, description: str = None, options: argparse.Namespace = OPTIONS) -> str:
+    user_id = get_user_info("id")
+    headers = {
+        "Authorization": "%(token_type)s %(access_token)s" % options.token_data,
+    }
+    endpoint = "https://api.spotify.com/v1/users/%s/playlists" % user_id
+
+    body = {"name": name}
+    if description:
+        body["description"] = description
+
+    response_data = post(endpoint, data=body, headers=headers)
+    playlist_id = response_data.get("id")
+
+    return playlist_id
+
+
+def add_tracks_to_playlist(playlist_id: str, tracks: Iterable[str],
+                           options: argparse.Namespace = OPTIONS) -> None:
+    headers = {
+        "Authorization": "%(token_type)s %(access_token)s" % options.token_data,
+    }
+    endpoint = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
+    page_size = 100
+
+    def pages(items: Iterable, page_size: int):
+        iterator = iter(items)
+        page = list(islice(iterator, page_size))
+        while page:
+            yield page
+            page = list(islice(iterator, page_size))
+
+    for page in pages(tracks, page_size):
+        body = {"uris": page}
+
+        response_data = post(endpoint, data=body, headers=headers)
+
+    snapshot_id = response_data.get("snapshot_id")
+
+    return snapshot_id
+
 
 
 ###############################################################################
@@ -393,68 +494,30 @@ def list_playlists_command(options: argparse.Namespace) -> None:
     options.output_serializer(list(list_playlists()), sys.stdout)
 
 
-def list_tags_command(options: argparse.Namespace) -> None:
-    """ List playlists matching the tag pattern from the DB. """
-    sql = ("SELECT name, id, snapshot_id FROM playlists WHERE name LIKE '%s%%';" %
-           options.playlist_prefix)
-    data = [{"id": id, "name": name[len(options.playlist_prefix):], "snapshot_id": snapshot_id}
-            for name, id, snapshot_id in db_execute(sql)]
-    options.output_serializer(data, sys.stdout)
+def create_playlist_command(options: argparse.Namespace) -> None:
+    playlist_id = create_playlist(options.playlist_name)
+    print(playlist_id)
 
+def show_playlist_command(options: argparse.Namespace) -> None:
+    options.output_serializer(list(show_playlist(options.playlist_id)), sys.stdout)
 
-def pull_tags_command(options: argparse.Namespace) -> None:
-    """ Fetch tag-playlists from spotify and store them in DB. """
-    def is_tag_playlist(playlist):
-        return playlist.get("name", "").startswith(options.playlist_prefix)
-
-    sql = "SELECT id, snapshot_id FROM playlists;"
-    playlist_snapshots = {playlist_id: snapshot_id
-                          for playlist_id, snapshot_id in db_execute(sql)}
-
-    artists = dict()
-
-    for playlist in filter(is_tag_playlist, list_playlists()):
-        playlist_id = playlist["id"]
-        snapshot_id = playlist["snapshot_id"]
-
-        if playlist_snapshots.get(playlist_id) == snapshot_id:
-            continue
-
-        save_playlist_in_db(playlist)
-        print("--- %s" % playlist.get("name"))
-
-        for entry in list_tracks_for_playlist(playlist):
-            print(entry.get("track", {}).get("name"))
-
-            track = entry["track"]
-
-            save_track_in_db(track)
-
-            add_track_to_playlist(playlist=playlist, track=track)
-
-            #     album = track.get("album")
-            #     albums.append(album)
-
-            artists.update({track_artist.get("id"): track_artist
-                            for track_artist in track.get("artists", [])})
-
-
-def list_tracks_command(options: argparse.Namespace) -> None:
-    sql = "SELECT id, name FROM tracks;"
-    data = [{"id": id, "name": name}
-            for id, name in db_execute(sql)]
-    options.output_serializer(data, sys.stdout)
+def append_playlist_command(options: argparse.Namespace) -> None:
+    add_tracks_to_playlist(options.playlist_id, map(lambda s: s.strip(), sys.stdin))
 
 
 
-def parse_arguments(arguments: [str], namespace: argparse.Namespace=None) -> argparse.Namespace:
+def parse_arguments(arguments: [str], namespace: argparse.Namespace = None) -> argparse.Namespace:
     output_parser = argparse.ArgumentParser(add_help=False)
 
     def output_type(serializer_name):
         return SERIALIZERS[serializer_name]
+
     output_parser.add_argument("-o", "--output", action="store",  # choices=SERIALIZERS,
                                metavar="FORMAT", dest="output_serializer", type=output_type,
                                default="json", help="The output format to use.")
+
+    input_parser = argparse.ArgumentParser(add_help=False)
+
     loglevel_parser = argparse.ArgumentParser(add_help=False)
     loglevel_parser.add_argument("--log-level", action=StoreDictValue, choices=LOG_LEVELS,
                                  dest="log_level", default=logging.INFO,
@@ -482,55 +545,72 @@ def parse_arguments(arguments: [str], namespace: argparse.Namespace=None) -> arg
     # Tracks ###################################################################
     track_parser = subparsers.add_parser("tracks", help="Manage tracks")
     track_parser.set_defaults(command=lambda _: track_parser.print_usage())
-    track_subparsers = track_parser.add_subparsers(title="Track management commands")
+    # track_subparsers = track_parser.add_subparsers(title="Track management commands")
 
-    track_list_parser = track_subparsers.add_parser("list", help="List current tracks in local cache.",
-                                                    parents=[output_parser])
-    track_list_parser.set_defaults(command=list_tracks_command)
+    # track_list_parser = track_subparsers.add_parser(
+    #     "list", help="List current tracks in local cache.", parents=[output_parser])
+    # track_list_parser.set_defaults(command=list_tracks_command)
 
     # Tokens ##################################################################
     token_parser = subparsers.add_parser("token", help="Handle authentication tokens")
     token_parser.set_defaults(command=lambda _: token_parser.print_usage())
     token_subparsers = token_parser.add_subparsers(title="Token management commands")
 
-    token_request_parser = token_subparsers.add_parser("request", help="Request new token, both access- and refresh-token.")
+    token_request_parser = token_subparsers.add_parser("request", help="Request new token, "
+                                                       "both access- and refresh-token.")
     token_request_parser.set_defaults(command=request_token_command)
-    token_request_parser.add_argument("--port",
-                                      action="store", type=int, dest="redirect_server_port", metavar="PORT",
-                                      default=DEFAULT_REDIRECT_SERVER_PORT,
-                                      help=("Server port to use for the local redirect server."
-                                            " Default is %d." % DEFAULT_REDIRECT_SERVER_PORT))
+    token_request_parser.add_argument(
+        "--port",
+        action="store", type=int, dest="redirect_server_port", metavar="PORT",
+        default=DEFAULT_REDIRECT_SERVER_PORT,
+        help=("Server port to use for the local redirect server."
+              " Default is %d." % DEFAULT_REDIRECT_SERVER_PORT))
 
-    token_refresh_parser = token_subparsers.add_parser("refresh", help="Refresh access-token using existing refresh-token")
+    token_refresh_parser = token_subparsers.add_parser(
+        "refresh", help="Refresh access-token using existing refresh-token")
     token_refresh_parser.set_defaults(command=refresh_token_command)
 
-    token_validation_parser = token_subparsers.add_parser("validate", help="Check if the current token is valid")
+    token_validation_parser = token_subparsers.add_parser(
+        "validate", help="Check if the current token is valid")
     token_validation_parser.set_defaults(command=local_token_validation_command)
 
     # Tags ####################################################################
     tag_parser = subparsers.add_parser("tags", help="Manage tags")
     tag_parser.set_defaults(command=lambda _: tag_parser.print_usage())
-    tag_subparsers = tag_parser.add_subparsers(title="Tag management commands")
+    # tag_subparsers = tag_parser.add_subparsers(title="Tag management commands")
 
-    tag_list_parser = tag_subparsers.add_parser("list", help="List current tags in local cache.",
-                                                parents=[output_parser])
-    tag_list_parser.set_defaults(command=list_tags_command)
+    # tag_list_parser = tag_subparsers.add_parser("list", help="List current tags in local cache.",
+    #                                             parents=[output_parser])
+    # tag_list_parser.set_defaults(command=list_tags_command)
 
-    tag_pull_parser = tag_subparsers.add_parser("pull", help="Pull current tags from Spotify.")
-    tag_pull_parser.set_defaults(command=pull_tags_command)
+    # tag_pull_parser = tag_subparsers.add_parser("pull", help="Pull current tags from Spotify.")
+    # tag_pull_parser.set_defaults(command=pull_tags_command)
 
-    tag_push_parser = tag_subparsers.add_parser("push", help="Push current tags to Spotify.")
+    # tag_push_parser = tag_subparsers.add_parser("push", help="Push current tags to Spotify.")
 
     # Playlists ###############################################################
     playlist_parser = subparsers.add_parser("playlists", help="Manage playlists")
     playlist_parser.set_defaults(command=lambda _: playlist_parser.print_usage())
     playlist_subparsers = playlist_parser.add_subparsers(title="Playlist commands")
 
-    playlist_create_parser = playlist_subparsers.add_parser("create", help="Create a new (smart) playlist.")
-    playlist_create_parser.set_defaults(command=lambda _: playlist_create_parser.print_usage())
+    playlist_create_parser = playlist_subparsers.add_parser(
+        "create", help="Create a new playlist.")
+    playlist_create_parser.set_defaults(command=create_playlist_command)
+    playlist_create_parser.add_argument("playlist_name", help="The name of the playlist")
 
-    playlist_list_parser = playlist_subparsers.add_parser("list", help="List all playlists.", parents=[output_parser])
+    playlist_list_parser = playlist_subparsers.add_parser(
+        "list", help="List all playlists.", parents=[output_parser])
     playlist_list_parser.set_defaults(command=list_playlists_command)
+
+    playlist_show_parser = playlist_subparsers.add_parser(
+        "show", help="Show a playlist.", parents=[output_parser])
+    playlist_show_parser.set_defaults(command=show_playlist_command)
+    playlist_show_parser.add_argument("playlist_id", help="The id of the playlist")
+
+    playlist_append_parser = playlist_subparsers.add_parser(
+        "append", help="Append tracks to a playlist.", parents=[input_parser])
+    playlist_append_parser.set_defaults(command=append_playlist_command)
+    playlist_append_parser.add_argument("playlist_id", help="The id of the playlist")
 
     options = parser.parse_args(arguments, namespace=namespace)
 
