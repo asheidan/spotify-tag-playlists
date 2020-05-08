@@ -92,3 +92,4 @@ ENV/
 access_token.json
 spotify_app.json
 cache.db
+/.mypy_cache/

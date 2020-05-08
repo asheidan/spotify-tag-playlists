@@ -7,7 +7,6 @@ from datetime import datetime, timedelta, tzinfo
 import http.server
 import json
 import logging
-import sqlite3
 import sys
 from typing import Iterator, Tuple, Dict
 import urllib.error
@@ -34,13 +33,13 @@ DEFAULT_CACHE_FILE = "cache.db"
 DEFAULT_SPOTIFY_APP_FILE = "spotify_app.json"
 DEFAULT_TOKEN_FILE = "access_token.json"
 
-## Serializing ################################################################
+# Serializing #################################################################
 
 SERIALIZERS = {
-    "json": lambda o, f: json.dump(o, f),
+    "json": json.dump,
 }
 if yaml:
-    SERIALIZERS["yaml"] = lambda o, f: yaml.dump(o, f)
+    SERIALIZERS["yaml"] = yaml.dump
 else:
     def stupid_yaml_serializer(data, output_file, level=0, indent_first=True):
         if isinstance(data, list):
@@ -98,12 +97,14 @@ class UTCtz(tzinfo):
     def dst(self, dt):
         return timedelta(0)
 
+
 UTC = UTCtz()
 
 
 logger = logging.getLogger("spotagify")
 
 # Stuff #######################################################################
+
 
 class StoreDictValue(argparse.Action):
     def __init__(self, option_strings, dest, nargs=None, choices=None, **kwargs):
@@ -276,138 +277,6 @@ def refresh_token(refresh_token: str, client_id: str, client_secret: str) -> Dic
         response_data["refresh_token"] = refresh_token
 
     return response_data
-
-
-# DB ##########################################################################
-
-db_logger = logging.getLogger("spotagify.db")
-
-
-def tidy_sql(sql: str) -> str:
-    return " ".join((line.strip() for line in sql.splitlines()))
-
-
-def db_connection(options: argparse.Namespace=OPTIONS) -> sqlite3.Connection:
-    if hasattr(db_connection, "connection"):
-        return db_connection.connection
-
-    db_connection.connection = sqlite3.connect(options.cache_url)
-
-    create_tables_in_database(db_cursor(db_connection.connection))
-
-    return db_connection.connection
-
-
-def db_cursor(connection: sqlite3.Connection=None) -> sqlite3.Cursor:
-    connection = connection or db_connection()
-    cursor = connection.cursor()
-    return cursor
-
-
-def db_execute(sql: str, *args, cursor: sqlite3.Cursor=None, **kwargs) -> sqlite3.Cursor:
-    cursor = cursor or db_cursor()
-
-    sql_query = tidy_sql(sql)
-
-    db_logger.debug(sql_query)
-    if args:
-        db_logger.debug(args)
-
-    cursor.execute(sql, args, **kwargs)
-
-    return cursor
-
-
-def create_tables_in_database(cursor: sqlite3.Cursor=None) -> None:
-    cursor = cursor or db_cursor()
-
-    db_execute("""SELECT name FROM sqlite_master WHERE type=?;""", "table", cursor=cursor)
-    existing_tables = frozenset(row[0] for row in cursor)
-
-    if "playlists" not in existing_tables:
-        db_execute("""CREATE TABLE playlists (
-                              id TEXT PRIMARY KEY NOT NULL,
-                              name TEXT,
-                              snapshot_id TEXT,
-                              href TEXT);""",
-                   cursor=cursor)
-
-    if "artists" not in existing_tables:
-        db_execute("""CREATE TABLE artists (
-                              id TEXT PRIMARY KEY NOT NULL,
-                              name TEXT,
-                              type TEXT);""",
-                   cursor=cursor)
-
-    if "albums" not in existing_tables:
-        db_execute("""CREATE TABLE albums (
-                              id TEXT PRIMARY KEY NOT NULL,
-                              name TEXT,
-                              type TEXT);""",
-                   cursor=cursor)
-
-    if "album_artists" not in existing_tables:
-        db_execute("""CREATE TABLE album_artists (
-                              album_id TEXT, artist_id TEXT,
-                              FOREIGN KEY (album_id) REFERENCES albums(id),
-                              FOREIGN KEY (artist_id) REFERENCES artists(id));""",
-                   cursor=cursor)
-
-    if "tracks" not in existing_tables:
-        db_execute("""CREATE TABLE tracks (
-                              id TEXT PRIMARY KEY NOT NULL,
-                              name TEXT);""",
-                   cursor=cursor)
-
-    if "track_artists" not in existing_tables:
-        db_execute("""CREATE TABLE track_artists (
-                              track_id TEXT, artist_id TEXT,
-                              FOREIGN KEY (track_id) REFERENCES tracks(id),
-                              FOREIGN KEY (artist_id) REFERENCES artists(id));""",
-                   cursor=cursor)
-
-    if "playlist_tracks" not in existing_tables:
-        db_execute("""CREATE TABLE playlist_tracks (
-                              playlist_id TEXT, track_id TEXT,
-                              FOREIGN KEY (playlist_id) REFERENCES playlists(id),
-                              FOREIGN KEY (track_id) REFERENCES tracks(id));""")
-
-    cursor.connection.commit()
-
-
-def save_playlist_in_db(playlist: Dict, cursor: sqlite3.Cursor=None) -> None:
-    db_logger.info("Saving playlist: %(name)s" % playlist)
-
-    cursor = db_execute("INSERT OR REPLACE INTO playlists(id, name, snapshot_id, href) VALUES(?, ?, ?, ?);",
-                        *playlist_to_db(playlist), cursor=cursor)
-
-    cursor.connection.commit()
-
-
-def save_track_in_db(track: Dict, cursor: sqlite3.Cursor=None) -> None:
-    db_logger.info("Saving track: %(name)s" % track)
-
-    cursor = db_execute("INSERT OR REPLACE INTO tracks(id, name) VALUES(?, ?);",
-                        *track_to_db(track), cursor=cursor)
-
-    cursor.connection.commit()
-
-
-def add_track_to_playlist(playlist=None, track=None, cursor: sqlite3.Cursor=None) -> None:
-    db_logger.info("Adding track to playlist: %s, %s" , track.get("name"), playlist.get("name"))
-
-    cursor = db_execute("INSERT OR REPLACE INTO playlist_tracks(playlist_id, track_id) VALUES(?, ?);",
-                        playlist["id"], track["id"], cursor=cursor)
-
-    cursor.connection.commit()
-
-
-def playlist_to_db(playlist: Dict) -> Tuple:
-    return playlist["id"], playlist["name"], playlist["snapshot_id"], playlist["href"]
-
-
-def track_to_db(track: Dict) -> Tuple:
-    return track["id"], track["name"]
 
 
 # Playlists ###################################################################
